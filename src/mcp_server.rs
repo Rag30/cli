@@ -454,6 +454,15 @@ fn walk_resources(prefix: &str, resources: &HashMap<String, RestResource>, tools
                     }),
                 );
             }
+            if method.supports_media_download {
+                properties.insert(
+                    "output".to_string(),
+                    json!({
+                        "type": "string",
+                        "description": "Relative local file path to save downloaded binary content. Required for binary downloads (e.g. PDFs, images). Must be relative to the current directory and cannot contain '..'."
+                    }),
+                );
+            }
             if method.parameters.contains_key("pageToken") {
                 properties.insert(
                     "page_all".to_string(),
@@ -802,6 +811,23 @@ async fn execute_mcp_method(
         None
     };
 
+    let output_path = if let Some(raw) = arguments
+        .get("output")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let p = std::path::Path::new(raw);
+        if p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir) {
+            return Err(GwsError::Validation(format!(
+                "Output path '{}' is not allowed. Paths must be relative and within the current directory.",
+                raw
+            )));
+        }
+        Some(raw)
+    } else {
+        None
+    };
+
     let page_all = arguments
         .get("page_all")
         .and_then(|v| v.as_bool())
@@ -831,7 +857,7 @@ async fn execute_mcp_method(
         body_str.as_deref(),
         token.as_deref(),
         auth_method,
-        None,
+        output_path,
         upload_path,
         false,
         &pagination,
