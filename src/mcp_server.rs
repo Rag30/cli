@@ -459,7 +459,7 @@ fn walk_resources(prefix: &str, resources: &HashMap<String, RestResource>, tools
                     "output".to_string(),
                     json!({
                         "type": "string",
-                        "description": "Relative local file path to save downloaded binary content. Required for binary downloads (e.g. PDFs, images). Must be relative to the current directory and cannot contain '..'."
+                        "description": "Local file path to save downloaded binary content. Required for binary downloads (e.g. PDFs, images). May be absolute (preferred, e.g. /tmp/foo.pdf) or relative; some MCP clients launch gws with a non-writable CWD, so an absolute writable path like /tmp/<name> is safest."
                     }),
                 );
             }
@@ -811,22 +811,16 @@ async fn execute_mcp_method(
         None
     };
 
-    let output_path = if let Some(raw) = arguments
+    // Output path may be absolute OR relative. MCP-client CWDs are unpredictable
+    // (e.g. Cowork launches `gws mcp` with CWD=/, which makes relative writes
+    // fail), so the LLM needs to specify a writable location explicitly. The
+    // restriction that previously matched upload_path's relative-only rule is
+    // dropped here because the upstream `gws` CLI's --output flag itself takes
+    // any path.
+    let output_path = arguments
         .get("output")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        let p = std::path::Path::new(raw);
-        if p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir) {
-            return Err(GwsError::Validation(format!(
-                "Output path '{}' is not allowed. Paths must be relative and within the current directory.",
-                raw
-            )));
-        }
-        Some(raw)
-    } else {
-        None
-    };
+        .filter(|s| !s.is_empty());
 
     let page_all = arguments
         .get("page_all")
