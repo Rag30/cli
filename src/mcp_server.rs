@@ -454,12 +454,29 @@ fn walk_resources(prefix: &str, resources: &HashMap<String, RestResource>, tools
                     }),
                 );
             }
-            if method.supports_media_download {
+            // `output` is plumbed two ways:
+            //   1. supportsMediaDownload methods (Drive files.get with alt=media,
+            //      files.export, etc.) — bytes stream directly from Google as
+            //      a non-JSON content-type; executor::handle_binary_response
+            //      writes them.
+            //   2. Gmail attachments — the response is JSON with a base64url
+            //      `data` field. We post-process that response below.
+            let is_gmail_attachment_get = method
+                .id
+                .as_deref()
+                .map(|id| id == "gmail.users.messages.attachments.get")
+                .unwrap_or(false);
+            if method.supports_media_download || is_gmail_attachment_get {
+                let desc = if is_gmail_attachment_get {
+                    "Local file path to save the decoded attachment bytes (Gmail returns base64url-encoded data inline; setting output decodes and writes it to disk instead of returning the base64). Absolute path under /tmp/<name> recommended."
+                } else {
+                    "Local file path to save downloaded binary content. Required for binary downloads (e.g. PDFs, images). May be absolute (preferred, e.g. /tmp/foo.pdf) or relative; some MCP clients launch gws with a non-writable CWD, so an absolute writable path like /tmp/<name> is safest."
+                };
                 properties.insert(
                     "output".to_string(),
                     json!({
                         "type": "string",
-                        "description": "Local file path to save downloaded binary content. Required for binary downloads (e.g. PDFs, images). May be absolute (preferred, e.g. /tmp/foo.pdf) or relative; some MCP clients launch gws with a non-writable CWD, so an absolute writable path like /tmp/<name> is safest."
+                        "description": desc
                     }),
                 );
             }
@@ -861,6 +878,51 @@ async fn execute_mcp_method(
         true,
     )
     .await?;
+
+    // Post-process: Gmail attachment responses are JSON with a base64url
+    // `data` field. If `output` was set, decode the data and write it to disk,
+    // then return a small summary instead of the (potentially massive) base64
+    // string. Without this the LLM gets back the whole inline payload.
+    let is_gmail_attachment_get = method
+        .id
+        .as_deref()
+        .map(|id| id == "gmail.users.messages.attachments.get")
+        .unwrap_or(false);
+    let result = if is_gmail_attachment_get {
+        if let (Some(path), Some(val)) = (output_path, result.as_ref()) {
+            if let Some(data_b64) = val.get("data").and_then(|v| v.as_str()) {
+                use base64::Engine;
+                let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(data_b64)
+                    .or_else(|_| {
+                        base64::engine::general_purpose::URL_SAFE.decode(data_b64)
+                    })
+                    .map_err(|e| {
+                        GwsError::Validation(format!(
+                            "Failed to base64url-decode Gmail attachment data: {e}"
+                        ))
+                    })?;
+                tokio::fs::write(path, &decoded).await.map_err(|e| {
+                    GwsError::Validation(format!(
+                        "Failed to write Gmail attachment to '{}': {e}",
+                        path
+                    ))
+                })?;
+                Some(json!({
+                    "status": "success",
+                    "saved_file": path,
+                    "bytes": decoded.len(),
+                    "attachmentId": val.get("attachmentId"),
+                }))
+            } else {
+                result
+            }
+        } else {
+            result
+        }
+    } else {
+        result
+    };
 
     let text_content = match result {
         Some(val) => serde_json::to_string_pretty(&val).unwrap_or_else(|_| "[]".to_string()),
