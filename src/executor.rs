@@ -190,7 +190,8 @@ async fn build_http_request(
             })?;
 
             request = request.query(&[("uploadType", "multipart")]);
-            let (multipart_body, content_type) = build_multipart_body(&input.body, &file_bytes)?;
+            let (multipart_body, content_type) =
+                build_multipart_body(&input.body, &file_bytes, upload_path)?;
             request = request.header("Content-Type", content_type);
             request = request.body(multipart_body);
         } else if let Some(ref body_val) = input.body {
@@ -734,15 +735,24 @@ fn handle_error_response<T>(
 fn build_multipart_body(
     metadata: &Option<Value>,
     file_bytes: &[u8],
+    upload_path: &str,
 ) -> Result<(Vec<u8>, String), GwsError> {
     let boundary = format!("gws_boundary_{:016x}", rand::random::<u64>());
 
-    // Determine the media MIME type from the metadata's mimeType field, or fall back
+    // Determine the media MIME type from the metadata's mimeType field, or fall back.
+    // Gmail's raw-message upload (messages send/insert/import) rejects
+    // application/octet-stream and the Message schema has no top-level mimeType
+    // to carry an override, so .eml files default to message/rfc822.
+    let ext_default = if upload_path.to_lowercase().ends_with(".eml") {
+        "message/rfc822"
+    } else {
+        "application/octet-stream"
+    };
     let media_mime = metadata
         .as_ref()
         .and_then(|m| m.get("mimeType"))
         .and_then(|v| v.as_str())
-        .unwrap_or("application/octet-stream");
+        .unwrap_or(ext_default);
 
     // Build multipart/related body
     let metadata_json = metadata
